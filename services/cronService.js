@@ -1,11 +1,11 @@
-const cron = require('node-cron');
-const { scrapeCourtData } = require('./scraperService');
-const { processCaseUpdates } = require('./trackingService');
-const { broadcastCourtUpdate } = require('./websocketService');
-const { CourtSnapshot } = require('../models');
-const logger = require('../config/logger');
-const { upsertCurrentCourts } = require('./currentCourtService');
-const { CurrentCourt } = require('../models');
+const cron = require("node-cron");
+const { scrapeCourtData } = require("./scraperService");
+const { processCaseUpdates } = require("./trackingService");
+const { broadcastCourtUpdate } = require("./websocketService");
+const { CourtSnapshot } = require("../models");
+const logger = require("../config/logger");
+const { upsertCurrentCourts } = require("./currentCourtService");
+const { CurrentCourt } = require("../models");
 
 /* -------------------- STATE -------------------- */
 
@@ -49,27 +49,30 @@ function startRealtimeScraper() {
       scrapeCount++;
       logger.info(`Starting scrape #${scrapeCount}`);
 
-      const {
-        allCourts,
-        changedCourts,
-        scrapedAt,
-        skipped
-      } = await scrapeCourtData();
+      const { allCourts, changedCourts, scrapedAt, skipped } =
+        await scrapeCourtData();
 
       // ✅ ALWAYS persist full state
       await upsertCurrentCourts(allCourts, scrapedAt);
+
+      // ✅ CACHE FOR API
+      lastCourtData = {
+        success: true,
+        scrapedAt,
+        courts: allCourts,
+      };
 
       // ✅ ONLY deltas trigger side effects
       if (!skipped && changedCourts.length) {
         await processCaseUpdates({
           courts: changedCourts,
-          scrapedAt
+          scrapedAt,
         });
 
         broadcastCourtUpdate({
-          type: 'COURT_DELTA',
+          type: "COURT_DELTA",
           courts: changedCourts,
-          scrapedAt
+          scrapedAt,
         });
       }
 
@@ -77,7 +80,7 @@ function startRealtimeScraper() {
 
       logger.info(`Scrape #${scrapeCount} done`);
     } catch (err) {
-      logger.error('Realtime scraper error:', err);
+      logger.error("Realtime scraper error:", err);
       backoffUntil = Date.now() + BACKOFF_MS;
     } finally {
       scraperLockUntil = 0;
@@ -88,23 +91,23 @@ function startRealtimeScraper() {
 /* -------------------- SNAPSHOT SCHEDULER -------------------- */
 
 function startSnapshotScheduler() {
-  cron.schedule('*/5 * * * *', async () => {
+  cron.schedule("*/5 * * * *", async () => {
     try {
       const courts = (
         await CurrentCourt.find({}, { _id: 0, data: 1 }).lean()
-      ).map(c => c.data);
+      ).map((c) => c.data);
 
       if (!courts.length) return;
 
-      await require('../models').CourtSnapshot.create({
-        courthouse: 'Gujarat High Court',
+      await require("../models").CourtSnapshot.create({
+        courthouse: "Gujarat High Court",
         snapshotTime: new Date(),
-        courts
+        courts,
       });
 
-      logger.info('Snapshot saved');
+      logger.info("Snapshot saved");
     } catch (e) {
-      logger.error('Snapshot error:', e);
+      logger.error("Snapshot error:", e);
     }
   });
 }
@@ -112,13 +115,13 @@ function startSnapshotScheduler() {
 /* -------------------- CLEANUP SCHEDULER -------------------- */
 
 function startCleanupScheduler() {
-  logger.info('Starting cleanup scheduler (daily @ 02:00)');
+  logger.info("Starting cleanup scheduler (daily @ 02:00)");
 
-  const job = cron.schedule('0 2 * * *', async () => {
+  const job = cron.schedule("0 2 * * *", async () => {
     try {
-      logger.info('Cleanup job executed (TTL indexes handle deletions)');
+      logger.info("Cleanup job executed (TTL indexes handle deletions)");
     } catch (error) {
-      logger.error('Cleanup scheduler error:', error);
+      logger.error("Cleanup scheduler error:", error);
     }
   });
 
@@ -134,7 +137,7 @@ function getScraperStatus() {
     lockedUntil: scraperLockUntil ? new Date(scraperLockUntil) : null,
     backoffUntil: backoffUntil ? new Date(backoffUntil) : null,
     interval: SCRAPER_INTERVAL,
-    hasCachedData: !!lastCourtData
+    hasCachedData: !!lastCourtData,
   };
 }
 
@@ -153,5 +156,5 @@ module.exports = {
   startCleanupScheduler,
   getScraperStatus,
   getLastCourtData,
-  getLastScrapeTime
+  getLastScrapeTime,
 };
