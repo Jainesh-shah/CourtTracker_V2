@@ -15,28 +15,6 @@ function cooldownPassed(lastTime) {
   return !lastTime || now() - new Date(lastTime).getTime() > COOLDOWN_MS;
 }
 
-/**
- * INTERNAL STATE → ALERT TYPE
- */
-const STATE_TO_ALERT = {
-  FAR: 'early_warning',
-  NEAR: 'early_warning',
-  VERY_NEAR: 'approaching',
-  NEXT: 'approaching',
-  IN_SESSION: 'in_session',
-  COMPLETED: 'completed'
-};
-
-/**
- * ALERT TYPE → USER SETTING KEY
- */
-const ALERT_TO_SETTING = {
-  early_warning: 'earlyWarning',
-  approaching: 'approaching',
-  in_session: 'inSession',
-  completed: 'completed'
-};
-
 function buildHistoryEvent(court, scrapedAt) {
   return {
     caseNumber: court.caseNumber,
@@ -45,39 +23,10 @@ function buildHistoryEvent(court, scrapedAt) {
     judgeName: court.judgeName,
     benchType: court.benchType,
     status: court.caseStatus,
-    position: court.queuePosition,
-    gsrno: court.gsrno,
     streamUrl: court.streamUrl,
     isLive: court.isLive,
     scrapedAt: new Date(scrapedAt)
   };
-}
-
-/* ==================== QUEUE PRECOMPUTATION ==================== */
-
-function buildCourtQueues(courts) {
-  const queues = {};
-
-  courts.forEach(c => {
-    if (!c.courtNumber) return;
-    if (!queues[c.courtNumber]) queues[c.courtNumber] = [];
-    queues[c.courtNumber].push(c);
-  });
-
-  const result = {};
-
-  for (const courtNumber in queues) {
-    const pending = queues[courtNumber]
-      .filter(c => c.queuePosition !== null && !['IN_SESSION', 'SITTING_OVER'].includes(c.caseStatus))
-      .sort((a, b) => a.queuePosition - b.queuePosition);
-
-    result[courtNumber] = {
-      pending,
-      currentCase: queues[courtNumber].find(c => c.caseStatus === 'IN_SESSION') || null
-    };
-  }
-
-  return result;
 }
 
 /* ==================== MAIN ENTRY ==================== */
@@ -92,11 +41,9 @@ async function processCaseUpdates({ courts, scrapedAt }) {
   const devices = await Device.find({ isActive: true });
   const deviceMap = Object.fromEntries(devices.map(d => [d.deviceId, d]));
 
-  const courtQueues = buildCourtQueues(courts);
-
   for (const watch of watchlists) {
     try {
-      await processWatchlist(watch, courts, courtQueues, deviceMap);
+      await processWatchlist(watch, courts, deviceMap, scrapedAt);
     } catch (e) {
       logger.error(`Watchlist ${watch._id} failed`, e);
     }
@@ -105,13 +52,12 @@ async function processCaseUpdates({ courts, scrapedAt }) {
 
 /* ==================== WATCHLIST PROCESSOR ==================== */
 
-async function processWatchlist(watch, courts, courtQueues, deviceMap) {
+async function processWatchlist(watch, courts, deviceMap, scrapedAt) {
   const {
     caseNumber,
     deviceId,
     notificationSettings,
     lastSeenStatus,
-    lastSeenPosition,
     missCount = 0,
     lastNotificationTime
   } = watch;
@@ -121,7 +67,7 @@ async function processWatchlist(watch, courts, courtQueues, deviceMap) {
 
   const court = courts.find(c => c.caseNumber === caseNumber);
 
-  /* ---------- CASE NOT FOUND (COMPLETED) ---------- */
+  /* ---------- CASE NOT FOUND → POSSIBLE COMPLETED ---------- */
   if (!court) {
     watch.missCount = missCount + 1;
 
@@ -131,7 +77,14 @@ async function processWatchlist(watch, courts, courtQueues, deviceMap) {
       notificationSettings.completed &&
       cooldownPassed(lastNotificationTime)
     ) {
-      await sendCaseAlert(deviceId, device.fcmToken, caseNumber, 'completed', {});
+      await sendCaseAlert(
+        deviceId,
+        device.fcmToken,
+        caseNumber,
+        'completed',
+        {}
+      );
+
       watch.lastSeenStatus = 'COMPLETED';
       watch.lastNotificationTime = new Date();
     }
@@ -143,59 +96,30 @@ async function processWatchlist(watch, courts, courtQueues, deviceMap) {
   /* ---------- CASE FOUND ---------- */
   watch.missCount = 0;
 
-  const queue = courtQueues[court.courtNumber];
-  const pending = queue?.pending || [];
-  const position =
-    pending.findIndex(c => c.caseNumber === caseNumber) + 1 || null;
+  /* ---------- IN SESSION DETECTION ---------- */
+  if (
+    court.caseStatus === 'IN_SESSION' &&
+    lastSeenStatus !== 'IN_SESSION' &&
+    notificationSettings.inSession &&
+    cooldownPassed(lastNotificationTime)
+  ) {
+    await sendCaseAlert(
+      deviceId,
+      device.fcmToken,
+      caseNumber,
+      'in_session',
+      {
+        courtNumber: court.courtNumber,
+        judgeName: court.judgeName,
+        streamUrl: court.streamUrl
+      }
+    );
 
-  const velocity =
-    lastSeenPosition && position ? lastSeenPosition - position : 0;
-
-  /* ---------- STATE DETECTION ---------- */
-
-  let newState = null;
-
-  if (court.caseStatus === 'IN_SESSION') newState = 'IN_SESSION';
-  else if (position === 1) newState = 'NEXT';
-  else if (position <= 3) newState = 'VERY_NEAR';
-  else if (position <= 10) newState = 'NEAR';
-  else if (position) newState = 'FAR';
-
-  /* ---------- NOTIFICATION ---------- */
-
-  if (newState && newState !== lastSeenStatus) {
-    const alertType = STATE_TO_ALERT[newState];
-    const settingKey = ALERT_TO_SETTING[alertType];
-
-    if (!alertType || !settingKey) {
-      logger.warn(
-        `[NOTIFY SKIP] Invalid state=${newState} case=${caseNumber}`
-      );
-    } else if (
-      notificationSettings[settingKey] &&
-      cooldownPassed(lastNotificationTime)
-    ) {
-      await sendCaseAlert(
-        deviceId,
-        device.fcmToken,
-        caseNumber,
-        alertType,
-        {
-          courtNumber: court.courtNumber,
-          judgeName: court.judgeName,
-          position,
-          velocity
-        }
-      );
-
-      watch.lastSeenStatus = newState;
-      watch.lastNotificationTime = new Date();
-    }
+    watch.lastSeenStatus = 'IN_SESSION';
+    watch.lastNotificationTime = new Date();
   }
 
-  watch.lastSeenPosition = position;
   watch.lastSeenCourt = court.courtNumber;
-
   await watch.save();
 }
 
@@ -212,8 +136,7 @@ async function processGlobalCaseHistory(courts, scrapedAt) {
 
     const current = {
       caseNumber: court.caseNumber,
-      status: court.caseStatus,
-      queuePosition: court.queuePosition
+      status: court.caseStatus
     };
 
     if (!prev) {
@@ -224,8 +147,7 @@ async function processGlobalCaseHistory(courts, scrapedAt) {
 
     const changed =
       prev.caseNumber !== current.caseNumber ||
-      prev.status !== current.status ||
-      prev.queuePosition !== current.queuePosition;
+      prev.status !== current.status;
 
     if (changed) {
       historyEvents.push(buildHistoryEvent(court, scrapedAt));
@@ -259,8 +181,7 @@ async function updateCaseStatistics(courts) {
             $each: [{
               status: c.caseStatus,
               timestamp: new Date(),
-              courtNumber: c.courtNumber,
-              queuePosition: c.queuePosition
+              courtNumber: c.courtNumber
             }],
             $slice: -100
           }
@@ -270,8 +191,6 @@ async function updateCaseStatistics(courts) {
     );
   }
 }
-
-/* ==================== EXPORT ==================== */
 
 module.exports = {
   processCaseUpdates
