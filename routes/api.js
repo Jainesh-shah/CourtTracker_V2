@@ -116,6 +116,12 @@ router.get('/watchlist/:deviceId', async (req, res) => {
 });
 
 /* ==================== COURTS (CACHED ONLY) ==================== */
+function isStale(scrapedAt) {
+  if (!scrapedAt) return true;
+
+  const age = Date.now() - new Date(scrapedAt).getTime();
+  return age > 60 * 60 * 1000; // 1 hour
+}
 
 router.get('/courts', async (req, res) => {
   try {
@@ -124,6 +130,9 @@ router.get('/courts', async (req, res) => {
     res.json({
       success: true,
       scrapedAt: courts.scrapedAt,
+      checkedAt: courts.checkedAt,
+  changedAt: courts.changedAt,
+      stale: isStale(courts.scrapedAt),
       courts: courts.data
     });
   } catch (err) {

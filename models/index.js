@@ -174,9 +174,16 @@ caseStatisticsSchema.index({ watchCount: -1 });
 
 const CurrentCourtSchema = new mongoose.Schema({
   courtCode: { type: String, required: true, unique: true },
+
   data: { type: Object, required: true },
-  updatedAt: { type: Date, default: Date.now }
+
+  dataHash: { type: String, required: true },   // 🔐 NEW
+
+  checkedAt: { type: Date, default: Date.now }, // ⏱️ every scrape
+  changedAt: { type: Date, default: Date.now }  // 🔁 only on real change
+  
 });
+
 
 
 //
